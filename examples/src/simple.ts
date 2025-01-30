@@ -1,38 +1,26 @@
-import { Bench } from '../../src';
+import { Bench } from '../../src'
 
-const bench = new Bench({ time: 100 });
+const bench = new Bench({ name: 'simple benchmark', time: 100 })
 
 bench
   .add('faster task', () => {
-    console.log('I am faster');
+    console.log('I am faster')
   })
   .add('slower task', async () => {
-    await new Promise((r) => setTimeout(r, 1)); // we wait 1ms :)
-    console.log('I am slower');
+    await new Promise(resolve => setTimeout(resolve, 1)) // we wait 1ms :)
+    console.log('I am slower')
   })
-  .todo('unimplemented bench');
 
-await bench.run();
+await bench.run()
 
-console.table(bench.table());
-
-// Output:
-// ┌─────────┬───────────────┬──────────┬────────────────────┬───────────┬─────────┐
-// │ (index) │   Task Name   │ ops/sec  │ Average Time (ns)  │  Margin   │ Samples │
-// ├─────────┼───────────────┼──────────┼────────────────────┼───────────┼─────────┤
-// │    0    │ 'faster task' │ '41,621' │ 24025.791819761525 │ '±20.50%' │  4257   │
-// │    1    │ 'slower task' │  '828'   │ 1207382.7838323202 │ '±7.07%'  │   83    │
-// └─────────┴───────────────┴──────────┴────────────────────┴───────────┴─────────┘
-
-console.table(
-  bench.todos.map(({ name }) => ({
-    'Task name': name,
-  })),
-);
+console.log(bench.name)
+console.table(bench.table())
 
 // Output:
-// ┌─────────┬───────────────────────┐
-// │ (index) │       Task name       │
-// ├─────────┼───────────────────────┤
-// │    0    │ 'unimplemented bench' │
-// └─────────┴───────────────────────┘
+// simple benchmark
+// ┌─────────┬───────────────┬───────────────────┬───────────────────────┬────────────────────────┬────────────────────────┬─────────┐
+// │ (index) │ Task name     │ Latency avg (ns)  │ Latency med (ns)      │ Throughput avg (ops/s) │ Throughput med (ops/s) │ Samples │
+// ├─────────┼───────────────┼───────────────────┼───────────────────────┼────────────────────────┼────────────────────────┼─────────┤
+// │ 0       │ 'faster task' │ '63768 ± 4.02%'   │ '58954 ± 15255.00'    │ '18562 ± 1.67%'        │ '16962 ± 4849'         │ 1569    │
+// │ 1       │ 'slower task' │ '1542543 ± 7.14%' │ '1652502 ± 167851.00' │ '808 ± 19.65%'         │ '605 ± 67'             │ 65      │
+// └─────────┴───────────────┴───────────────────┴───────────────────────┴────────────────────────┴────────────────────────┴─────────┘
