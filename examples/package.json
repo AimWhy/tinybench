@@ -2,15 +2,22 @@
   "name": "examples",
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "pnpm@9.15.5",
+  "volta": {
+    "node": "22.13.1",
+    "pnpm": "9.15.5"
+  },
   "scripts": {
-    "build": "tsc",
-    "all": "pnpm run simple",
-    "simple": "tsx src/simple.ts",
-    "dev:simple": "tsx watch src/simple.ts"
+    "all": "run-s example:*",
+    "example:simple": "tsx src/simple.ts",
+    "simple:dev": "tsx --watch src/simple.ts",
+    "example:simple-gc": "tsx --expose_gc src/simple-gc.ts",
+    "simple-gc:dev": "tsx --watch --expose_gc src/simple-gc.ts",
+    "example:simple-bun": "bun run src/simple-bun.ts"
   },
   "license": "ISC",
   "devDependencies": {
-    "tsx": "^3.9.0",
-    "typescript": "^4.5.4"
+    "npm-run-all2": "^7.0.2",
+    "tsx": "^4.19.2"
   }
 }

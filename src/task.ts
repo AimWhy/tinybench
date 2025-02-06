@@ -1,229 +1,463 @@
+import pLimit from 'p-limit'
+
+import type { Bench } from './bench'
 import type {
-  Fn, TaskEvents, TaskResult, TaskEventsMap, FnOptions,
-} from '../types/index';
-import Bench from './bench';
-import tTable from './constants';
-import { createBenchEvent } from './event';
-import { getMean, getVariance, isAsyncFunction } from './utils';
+  AddEventListenerOptionsArgument,
+  Fn,
+  FnOptions,
+  RemoveEventListenerOptionsArgument,
+  TaskEvents,
+  TaskEventsMap,
+  TaskResult,
+} from './types'
+
+import { createBenchEvent, createErrorEvent } from './event'
+import {
+  getStatisticsSorted,
+  invariant,
+  isFnAsyncResource,
+  isPromiseLike,
+} from './utils'
 
 /**
  * A class that represents each benchmark task in Tinybench. It keeps track of the
- * results, name, Bench instance, the task function and the number times the task
- * function has been executed.
+ * results, name, the task function, the number times the task function has been executed, ...
  */
-export default class Task extends EventTarget {
-  bench: Bench;
+export class Task extends EventTarget {
+  /**
+   * The task name
+   */
+  readonly name: string
 
   /**
-   * task name
+   * The result object
    */
-  name: string;
-
-  fn: Fn;
-
-  /*
-   * the number of times the task
-   * function has been executed
-   */
-  runs = 0;
+  result: Readonly<TaskResult> | undefined
 
   /**
-   * the result object
+   * The number of times the task function has been executed
    */
-  result?: TaskResult;
+  runs = 0
 
   /**
-   * Task options
+   * The task synchronous status
    */
-  opts: FnOptions;
+  private readonly async: boolean
 
-  constructor(bench: Bench, name: string, fn: Fn, opts: FnOptions = {}) {
-    super();
-    this.bench = bench;
-    this.name = name;
-    this.fn = fn;
-    this.opts = opts;
-    // TODO: support signals in Tasks
+  /**
+   * The Bench instance reference
+   */
+  private readonly bench: Bench
+
+  /**
+   * The task function
+   */
+  private readonly fn: Fn
+
+  /**
+   * The task function options
+   */
+  private readonly fnOpts: Readonly<FnOptions>
+
+  constructor (bench: Bench, name: string, fn: Fn, fnOpts: FnOptions = {}) {
+    super()
+    this.bench = bench
+    this.name = name
+    this.fn = fn
+    this.fnOpts = fnOpts
+    this.async = isFnAsyncResource(fn)
+    // TODO: support signal in Tasks
+  }
+
+  addEventListener<K extends TaskEvents>(
+    type: K,
+    listener: TaskEventsMap[K],
+    options?: AddEventListenerOptionsArgument
+  ): void {
+    super.addEventListener(type, listener, options)
+  }
+
+  removeEventListener<K extends TaskEvents>(
+    type: K,
+    listener: TaskEventsMap[K],
+    options?: RemoveEventListenerOptionsArgument
+  ): void {
+    super.removeEventListener(type, listener, options)
   }
 
   /**
-   * run the current task and write the results in `Task.result` object
+   * reset the task to make the `Task.runs` a zero-value and remove the `Task.result` object property
+   * @internal
    */
-  async run() {
-    this.dispatchEvent(createBenchEvent('start', this));
-    let totalTime = 0; // ms
-    const samples: number[] = [];
-    const isAsync = isAsyncFunction(this.fn);
+  reset (): void {
+    this.dispatchEvent(createBenchEvent('reset', this))
+    this.runs = 0
+    this.result = undefined
+  }
 
-    await this.bench.setup(this, 'run');
+  /**
+   * run the current task and write the results in `Task.result` object property
+   * @returns the current task
+   * @internal
+   */
+  async run (): Promise<Task> {
+    if (this.result?.error) {
+      return this
+    }
+    this.dispatchEvent(createBenchEvent('start', this))
+    await this.bench.opts.setup?.(this, 'run')
+    const { error, samples: latencySamples } = (await this.benchmark(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.time!,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.iterations!
+    )) as { error?: Error; samples?: number[] }
+    await this.bench.opts.teardown?.(this, 'run')
 
-    if (this.opts.beforeAll != null) {
-      await this.opts.beforeAll.call(this);
+    this.processRunResult({ error, latencySamples })
+
+    return this
+  }
+
+  /**
+   * run the current task and write the results in `Task.result` object property (sync version)
+   * @returns the current task
+   * @internal
+   */
+  runSync (): this {
+    if (this.result?.error) {
+      return this
     }
 
-    while (
-      (totalTime < this.bench.time || this.runs < this.bench.iterations)
-      && !this.bench.signal?.aborted
-    ) {
-      if (this.opts.beforeEach != null) {
-        await this.opts.beforeEach.call(this);
-      }
+    invariant(
+      this.bench.concurrency === null,
+      'Cannot use `concurrency` option when using `runSync`'
+    )
+    this.dispatchEvent(createBenchEvent('start', this))
 
-      let taskStart = 0;
+    const setupResult = this.bench.opts.setup?.(this, 'run')
+    invariant(
+      !isPromiseLike(setupResult),
+      '`setup` function must be sync when using `runSync()`'
+    )
 
-      try {
-        taskStart = this.bench.now();
-        if (isAsync) {
-          await this.fn();
-        } else {
-          this.fn();
-        }
-      } catch (e) {
-        this.setResult({ error: e });
-      }
+    const { error, samples: latencySamples } = this.benchmarkSync(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.time!,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.iterations!
+    ) as { error?: Error; samples?: number[] }
 
-      const taskTime = this.bench.now() - taskStart;
-      this.runs += 1;
-      samples.push(taskTime);
-      totalTime += taskTime;
+    const teardownResult = this.bench.opts.teardown?.(this, 'run')
+    invariant(
+      !isPromiseLike(teardownResult),
+      '`teardown` function must be sync when using `runSync()`'
+    )
 
-      if (this.opts.afterEach != null) {
-        await this.opts.afterEach.call(this);
-      }
-    }
+    this.processRunResult({ error, latencySamples })
 
-    if (this.opts.afterAll != null) {
-      await this.opts.afterAll.call(this);
-    }
-
-    await this.bench.teardown(this, 'run');
-
-    samples.sort((a, b) => a - b);
-
-    {
-      const min = samples[0]!;
-      const max = samples[samples.length - 1]!;
-      const period = totalTime / this.runs;
-      const hz = 1000 / period;
-
-      // benchmark.js: https://github.com/bestiejs/benchmark.js/blob/42f3b732bac3640eddb3ae5f50e445f3141016fd/benchmark.js#L1912-L1927
-      const mean = getMean(samples);
-      const variance = getVariance(samples, mean);
-      const sd = Math.sqrt(variance);
-      const sem = sd / Math.sqrt(samples.length);
-      const df = samples.length - 1;
-      const critical = tTable[String(Math.round(df) || 1)] || tTable.infinity!;
-      const moe = sem * critical;
-      const rme = (moe / mean) * 100 || 0;
-
-      // mitata: https://github.com/evanwashere/mitata/blob/3730a784c9d83289b5627ddd961e3248088612aa/src/lib.mjs#L12
-      const p75 = samples[Math.ceil(samples.length * (75 / 100)) - 1]!;
-      const p99 = samples[Math.ceil(samples.length * (99 / 100)) - 1]!;
-      const p995 = samples[Math.ceil(samples.length * (99.5 / 100)) - 1]!;
-      const p999 = samples[Math.ceil(samples.length * (99.9 / 100)) - 1]!;
-
-      if (this.bench.signal?.aborted) {
-        return this;
-      }
-
-      this.setResult({
-        totalTime,
-        min,
-        max,
-        hz,
-        period,
-        samples,
-        mean,
-        variance,
-        sd,
-        sem,
-        df,
-        critical,
-        moe,
-        rme,
-        p75,
-        p99,
-        p995,
-        p999,
-      });
-    }
-
-    // eslint-disable-next-line no-lone-blocks
-    {
-      if (this.result?.error) {
-        this.dispatchEvent(createBenchEvent('error', this));
-        this.bench.dispatchEvent(createBenchEvent('error', this));
-      }
-
-      this.dispatchEvent(createBenchEvent('cycle', this));
-      this.bench.dispatchEvent(createBenchEvent('cycle', this));
-      // cycle and complete are equal in Task
-      this.dispatchEvent(createBenchEvent('complete', this));
-    }
-
-    return this;
+    return this
   }
 
   /**
    * warmup the current task
+   * @internal
    */
-  async warmup() {
-    this.dispatchEvent(createBenchEvent('warmup', this));
-    const startTime = this.bench.now();
-    let totalTime = 0;
+  async warmup (): Promise<void> {
+    if (this.result?.error) {
+      return
+    }
+    this.dispatchEvent(createBenchEvent('warmup', this))
+    await this.bench.opts.setup?.(this, 'warmup')
+    const { error } = (await this.benchmark(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.warmupTime!,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.warmupIterations!
+    )) as { error?: Error }
+    await this.bench.opts.teardown?.(this, 'warmup')
 
-    await this.bench.setup(this, 'warmup');
-    while (
-      (totalTime < this.bench.warmupTime
-        || this.runs < this.bench.warmupIterations)
-      && !this.bench.signal?.aborted
-    ) {
+    this.postWarmup(error)
+  }
+
+  /**
+   * warmup the current task (sync version)
+   * @internal
+   */
+  warmupSync (): void {
+    if (this.result?.error) {
+      return
+    }
+
+    this.dispatchEvent(createBenchEvent('warmup', this))
+
+    const setupResult = this.bench.opts.setup?.(this, 'warmup')
+    invariant(
+      !isPromiseLike(setupResult),
+      '`setup` function must be sync when using `runSync()`'
+    )
+
+    const { error } = this.benchmarkSync(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.warmupTime!,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      this.bench.opts.warmupIterations!
+    ) as { error?: Error }
+
+    const teardownResult = this.bench.opts.teardown?.(this, 'warmup')
+    invariant(
+      !isPromiseLike(teardownResult),
+      '`teardown` function must be sync when using `runSync()`'
+    )
+
+    this.postWarmup(error)
+  }
+
+  private async benchmark (
+    time: number,
+    iterations: number
+  ): Promise<{ error?: unknown; samples?: number[] }> {
+    if (this.fnOpts.beforeAll != null) {
       try {
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.resolve().then(this.fn);
-      } catch {
-        // todo
+        await this.fnOpts.beforeAll.call(this)
+      } catch (error) {
+        return { error }
+      }
+    }
+
+    // TODO: factor out
+    let totalTime = 0 // ms
+    const samples: number[] = []
+    const benchmarkTask = async () => {
+      if (this.fnOpts.beforeEach != null) {
+        await this.fnOpts.beforeEach.call(this)
       }
 
-      this.runs += 1;
-      totalTime = this.bench.now() - startTime;
+      let taskTime = 0 // ms;
+      if (this.async) {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const taskStart = this.bench.opts.now!()
+        // eslint-disable-next-line no-useless-call
+        await this.fn.call(this)
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        taskTime = this.bench.opts.now!() - taskStart
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const taskStart = this.bench.opts.now!()
+        // eslint-disable-next-line no-useless-call
+        this.fn.call(this)
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        taskTime = this.bench.opts.now!() - taskStart
+      }
+
+      samples.push(taskTime)
+      totalTime += taskTime
+
+      if (this.fnOpts.afterEach != null) {
+        await this.fnOpts.afterEach.call(this)
+      }
     }
-    this.bench.teardown(this, 'warmup');
 
-    this.runs = 0;
+    try {
+      const limit = pLimit(this.bench.threshold) // only for task level concurrency
+      const promises: Promise<void>[] = [] // only for task level concurrency
+      while (
+        // eslint-disable-next-line no-unmodified-loop-condition
+        (totalTime < time ||
+          samples.length + limit.activeCount + limit.pendingCount < iterations) &&
+        !this.bench.opts.signal?.aborted
+      ) {
+        if (this.bench.concurrency === 'task') {
+          promises.push(limit(benchmarkTask))
+        } else {
+          await benchmarkTask()
+        }
+      }
+      if (!this.bench.opts.signal?.aborted && promises.length > 0) {
+        await Promise.all(promises)
+      }
+    } catch (error) {
+      return { error }
+    }
+
+    if (this.fnOpts.afterAll != null) {
+      try {
+        await this.fnOpts.afterAll.call(this)
+      } catch (error) {
+        return { error }
+      }
+    }
+    return { samples }
   }
 
-  addEventListener<K extends TaskEvents, T = TaskEventsMap[K]>(
-    type: K,
-    listener: T,
-    options?: boolean | AddEventListenerOptions,
-  ) {
-    super.addEventListener(type, listener as any, options);
-  }
+  private benchmarkSync (
+    time: number,
+    iterations: number
+  ): { error?: unknown; samples?: number[] } {
+    if (this.fnOpts.beforeAll != null) {
+      try {
+        const beforeAllResult = this.fnOpts.beforeAll.call(this)
+        invariant(
+          !isPromiseLike(beforeAllResult),
+          '`beforeAll` function must be sync when using `runSync()`'
+        )
+      } catch (error) {
+        return { error }
+      }
+    }
 
-  removeEventListener<K extends TaskEvents, T = TaskEventsMap[K]>(
-    type: K,
-    listener: T,
-    options?: boolean | EventListenerOptions,
-  ) {
-    super.removeEventListener(type, listener as any, options);
+    // TODO: factor out
+    let totalTime = 0 // ms
+    const samples: number[] = []
+    const benchmarkTask = () => {
+      if (this.fnOpts.beforeEach != null) {
+        const beforeEachResult = this.fnOpts.beforeEach.call(this)
+        invariant(
+          !isPromiseLike(beforeEachResult),
+          '`beforeEach` function must be sync when using `runSync()`'
+        )
+      }
+
+      let taskTime = 0 // ms;
+
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const taskStart = this.bench.opts.now!()
+      // eslint-disable-next-line no-useless-call
+      const result = this.fn.call(this)
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      taskTime = this.bench.opts.now!() - taskStart
+
+      invariant(
+        !isPromiseLike(result),
+        'task function must be sync when using `runSync()`'
+      )
+
+      samples.push(taskTime)
+      totalTime += taskTime
+
+      if (this.fnOpts.afterEach != null) {
+        const afterEachResult = this.fnOpts.afterEach.call(this)
+        invariant(
+          !isPromiseLike(afterEachResult),
+          '`afterEach` function must be sync when using `runSync()`'
+        )
+      }
+    }
+
+    try {
+      while (
+        // eslint-disable-next-line no-unmodified-loop-condition
+        totalTime < time ||
+        samples.length < iterations
+      ) {
+        benchmarkTask()
+      }
+    } catch (error) {
+      return { error }
+    }
+
+    if (this.fnOpts.afterAll != null) {
+      try {
+        const afterAllResult = this.fnOpts.afterAll.call(this)
+        invariant(
+          !isPromiseLike(afterAllResult),
+          '`afterAll` function must be sync when using `runSync()`'
+        )
+      } catch (error) {
+        return { error }
+      }
+    }
+    return { samples }
   }
 
   /**
-   * change the result object values
+   * merge into the result object values
+   * @param result - the task result object to merge with the current result object values
    */
-  setResult(result: Partial<TaskResult>) {
-    this.result = { ...this.result, ...result } as TaskResult;
-    Object.freeze(this.reset);
+  private mergeTaskResult (result: Partial<TaskResult>): void {
+    this.result = Object.freeze({
+      ...this.result,
+      ...result,
+    }) as Readonly<TaskResult>
   }
 
-  /**
-   * reset the task to make the `Task.runs` a zero-value and remove the `Task.result`
-   * object
-   */
-  reset() {
-    this.dispatchEvent(createBenchEvent('reset', this));
-    this.runs = 0;
-    this.result = undefined;
+  private postWarmup (error: Error | undefined): void {
+    if (error) {
+      this.mergeTaskResult({ error })
+      this.dispatchEvent(createErrorEvent(this, error))
+      this.bench.dispatchEvent(createErrorEvent(this, error))
+      if (this.bench.opts.throws) {
+        throw error
+      }
+    }
+  }
+
+  private processRunResult ({
+    error,
+    latencySamples,
+  }: {
+    error?: Error
+    latencySamples?: number[]
+  }): void {
+    if (latencySamples) {
+      this.runs = latencySamples.length
+      const totalTime = latencySamples.reduce((a, b) => a + b, 0)
+
+      // Latency statistics
+      const latencyStatistics = getStatisticsSorted(
+        latencySamples.sort((a, b) => a - b)
+      )
+
+      // Throughput statistics
+      const throughputSamples = latencySamples
+        .map(sample =>
+          sample !== 0 ? 1000 / sample : 1000 / latencyStatistics.mean
+        ) // Use latency average as imputed sample
+        .sort((a, b) => a - b)
+      const throughputStatistics = getStatisticsSorted(throughputSamples)
+
+      if (this.bench.opts.signal?.aborted) {
+        return
+      }
+
+      this.mergeTaskResult({
+        critical: latencyStatistics.critical,
+        df: latencyStatistics.df,
+        hz: throughputStatistics.mean,
+        latency: latencyStatistics,
+        max: latencyStatistics.max,
+        mean: latencyStatistics.mean,
+        min: latencyStatistics.min,
+        moe: latencyStatistics.moe,
+        p75: latencyStatistics.p75,
+        p99: latencyStatistics.p99,
+        p995: latencyStatistics.p995,
+        p999: latencyStatistics.p999,
+        period: totalTime / this.runs,
+        rme: latencyStatistics.rme,
+        runtime: this.bench.runtime,
+        runtimeVersion: this.bench.runtimeVersion,
+        samples: latencyStatistics.samples,
+        sd: latencyStatistics.sd,
+        sem: latencyStatistics.sem,
+        throughput: throughputStatistics,
+        totalTime,
+        variance: latencyStatistics.variance,
+      })
+    }
+
+    if (error) {
+      this.mergeTaskResult({ error })
+      this.dispatchEvent(createErrorEvent(this, error))
+      this.bench.dispatchEvent(createErrorEvent(this, error))
+      if (this.bench.opts.throws) {
+        throw error
+      }
+    }
+
+    this.dispatchEvent(createBenchEvent('cycle', this))
+    this.bench.dispatchEvent(createBenchEvent('cycle', this))
+    // cycle and complete are equal in Task
+    this.dispatchEvent(createBenchEvent('complete', this))
   }
 }

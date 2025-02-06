@@ -6,9 +6,10 @@ node_modules
 # testing
 coverage
 
-# production
+# build
 dist
 build
+package
 
 # dotenv environment variables file
 .env
@@ -22,6 +23,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# cache
+.eslintcache
+
+# jetbrains
+.idea
+
 # misc
 .DS_Store
-.idea
+.orig

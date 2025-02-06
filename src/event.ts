@@ -1,21 +1,34 @@
-import type { BenchEvents } from '../types';
-import Task from './task';
+import type { Task } from './task'
+import type { BenchEvents } from './types'
 
-function createBenchEvent(
-  eventType: BenchEvents,
-  target: Task | null = null,
-) {
-  const event = new Event(eventType);
-  Object.defineProperty(event, 'task', {
-    value: target,
-    enumerable: true,
-    writable: false,
-    configurable: false,
-  });
-  return event;
+const createBenchEvent = (eventType: BenchEvents, target?: Task) => {
+  const event = new Event(eventType)
+  if (target) {
+    Object.defineProperty(event, 'task', {
+      configurable: false,
+      enumerable: true,
+      value: target,
+      writable: false,
+    })
+  }
+  return event
 }
 
-export default createBenchEvent;
-export {
-  createBenchEvent,
-};
+const createErrorEvent = (target: Task, error: Error) => {
+  const event = new Event('error')
+  Object.defineProperty(event, 'task', {
+    configurable: false,
+    enumerable: true,
+    value: target,
+    writable: false,
+  })
+  Object.defineProperty(event, 'error', {
+    configurable: false,
+    enumerable: true,
+    value: error,
+    writable: false,
+  })
+  return event
+}
+
+export { createBenchEvent, createErrorEvent }

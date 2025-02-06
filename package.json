@@ -1,52 +1,70 @@
 {
   "name": "tinybench",
-  "version": "2.5.0",
+  "version": "3.1.1",
   "type": "module",
-  "packageManager": "pnpm@7.5.1",
+  "packageManager": "pnpm@9.15.5",
+  "volta": {
+    "node": "22.13.1",
+    "pnpm": "9.15.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "directory": "package"
+  },
   "scripts": {
+    "prepare": "pnpm exec simple-git-hooks",
     "dev": "tsup --watch",
     "build": "tsup",
-    "prepare": "git config core.hooksPath .hooks",
-    "publish": "npm run build && clean-publish",
-    "release": "bumpp package.json --commit --push --tag && npm run publish",
-    "test": "vitest --no-threads"
+    "prepublishOnly": "pnpm build && rm -rf ./package && clean-publish",
+    "postpublish": "rm -rf ./package",
+    "typecheck": "tsc --noEmit",
+    "typedoc": "typedoc",
+    "lint": "eslint --cache src test examples eslint.config.js tsup.config.ts",
+    "lint:fix": "eslint --cache --fix src test examples eslint.config.js tsup.config.ts",
+    "release": "bumpp package.json --commit --push --tag",
+    "test": "vitest --retry=5 --run"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    "types": "./dist/index.d.ts",
-    "import": "./dist/index.js",
-    "require": "./dist/index.cjs",
-    "default": "./dist/index.cjs"
+    "require": {
+      "types": "./dist/index.d.cts",
+      "require": "./dist/index.cjs"
+    },
+    "import": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
-  "files": [
-    "dist/**"
-  ],
+  "files": ["dist/**"],
   "repository": "tinylibs/tinybench",
   "license": "MIT",
   "devDependencies": {
-    "@size-limit/preset-small-lib": "^7.0.4",
-    "@size-limit/time": "^7.0.8",
-    "@types/node": "^18.7.13",
-    "@typescript-eslint/eslint-plugin": "^5.35.1",
-    "@typescript-eslint/parser": "^5.35.1",
-    "bumpp": "^8.2.0",
-    "changelogithub": "^0.12.4",
-    "clean-publish": "^3.4.4",
-    "eslint": "^8.22.0",
-    "eslint-config-airbnb-base": "^15.0.0",
-    "eslint-plugin-import": "^2.26.0",
-    "nano-staged": "^0.5.0",
-    "size-limit": "^7.0.8",
-    "tsup": "^5.11.7",
-    "typescript": "^4.5.4",
-    "vite": "^2.9.12",
-    "vitest": "^0.14.2"
+    "@commitlint/cli": "^19.7.1",
+    "@commitlint/config-conventional": "^19.7.1",
+    "@cspell/eslint-plugin": "^8.17.3",
+    "@eslint/js": "^9.19.0",
+    "@size-limit/preset-small-lib": "^11.1.6",
+    "@size-limit/time": "^11.1.6",
+    "@types/node": "^22.13.1",
+    "bumpp": "^10.0.2",
+    "changelogithub": "^13.12.1",
+    "clean-publish": "^5.1.0",
+    "eslint": "^9.19.0",
+    "eslint-plugin-jsdoc": "^50.6.3",
+    "eslint-plugin-perfectionist": "^4.8.0",
+    "nano-staged": "^0.8.0",
+    "neostandard": "^0.12.1",
+    "p-limit": "^6.2.0",
+    "simple-git-hooks": "^2.11.1",
+    "size-limit": "^11.1.6",
+    "tsup": "^8.3.6",
+    "typedoc": "^0.27.6",
+    "typescript": "~5.7.3",
+    "vitest": "^3.0.5"
   },
-  "keywords": [
-    "benchmark",
-    "tinylibs",
-    "tiny"
-  ]
+  "keywords": ["benchmark", "tinylibs", "tiny"]
 }

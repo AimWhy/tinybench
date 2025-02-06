@@ -1,192 +1,301 @@
+import pLimit from 'p-limit'
+
 import type {
-  Hook,
-  Options,
-  Fn,
+  AddEventListenerOptionsArgument,
   BenchEvents,
-  TaskResult,
   BenchEventsMap,
+  BenchOptions,
+  Fn,
   FnOptions,
-} from '../types/index';
-import { createBenchEvent } from './event';
-import Task from './task';
-import { now } from './utils';
+  RemoveEventListenerOptionsArgument,
+  TaskResult,
+} from './types'
+
+import {
+  defaultMinimumIterations,
+  defaultMinimumTime,
+  defaultMinimumWarmupIterations,
+  defaultMinimumWarmupTime,
+  emptyFunction,
+} from './constants'
+import { createBenchEvent } from './event'
+import { Task } from './task'
+import {
+  formatNumber,
+  invariant,
+  type JSRuntime,
+  mToNs,
+  now,
+  runtime,
+  runtimeVersion,
+} from './utils'
 
 /**
- * The Benchmark instance for keeping track of the benchmark tasks and controlling
- * them.
+ * The Bench class keeps track of the benchmark tasks and controls them.
  */
-export default class Bench extends EventTarget {
-  /*
-   * @private the task map
+export class Bench extends EventTarget {
+  /**
+   * Executes tasks concurrently based on the specified concurrency mode.
+   *
+   * - When `mode` is set to `null` (default), concurrency is disabled.
+   * - When `mode` is set to 'task', each task's iterations (calls of a task function) run concurrently.
+   * - When `mode` is set to 'bench', different tasks within the bench run concurrently. Concurrent cycles.
    */
-  _tasks: Map<string, Task> = new Map();
+  concurrency: 'bench' | 'task' | null = null
 
-  _todos: Map<string, Task> = new Map();
+  /**
+   * The benchmark name.
+   */
+  readonly name?: string
 
-  signal?: AbortSignal;
+  /**
+   * The options.
+   */
+  readonly opts: Readonly<BenchOptions>
 
-  warmupTime = 100;
+  /**
+   * The JavaScript runtime environment.
+   */
+  readonly runtime: 'unknown' | JSRuntime
 
-  warmupIterations = 5;
+  /**
+   * The JavaScript runtime version.
+   */
+  readonly runtimeVersion: string
 
-  time = 500;
+  /**
+   * The maximum number of concurrent tasks to run @default Number.POSITIVE_INFINITY
+   */
+  threshold = Number.POSITIVE_INFINITY
 
-  iterations = 10;
+  /**
+   * tasks results as an array
+   * @returns the tasks results as an array
+   */
+  get results (): (Readonly<TaskResult> | undefined)[] {
+    return [...this._tasks.values()].map(task => task.result)
+  }
 
-  now = now;
+  /**
+   * tasks as an array
+   * @returns the tasks as an array
+   */
+  get tasks (): Task[] {
+    return [...this._tasks.values()]
+  }
 
-  setup: Hook;
+  /**
+   * the task map
+   */
+  private readonly _tasks = new Map<string, Task>()
 
-  teardown: Hook;
+  constructor (options: BenchOptions = {}) {
+    super()
+    this.name = options.name
+    delete options.name
+    this.runtime = runtime
+    this.runtimeVersion = runtimeVersion
+    this.opts = {
+      ...{
+        iterations: defaultMinimumIterations,
+        now,
+        setup: emptyFunction,
+        teardown: emptyFunction,
+        throws: false,
+        time: defaultMinimumTime,
+        warmup: true,
+        warmupIterations: defaultMinimumWarmupIterations,
+        warmupTime: defaultMinimumWarmupTime,
+      },
+      ...options,
+    }
 
-  constructor(options: Options = {}) {
-    super();
-    this.now = options.now ?? this.now;
-    this.warmupTime = options.warmupTime ?? this.warmupTime;
-    this.warmupIterations = options.warmupIterations ?? this.warmupIterations;
-    this.time = options.time ?? this.time;
-    this.iterations = options.iterations ?? this.iterations;
-    this.signal = options.signal;
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    this.setup = options.setup ?? (() => {});
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    this.teardown = options.teardown ?? (() => {});
-
-    if (this.signal) {
-      this.signal.addEventListener(
+    if (this.opts.signal) {
+      this.opts.signal.addEventListener(
         'abort',
         () => {
-          this.dispatchEvent(createBenchEvent('abort'));
+          this.dispatchEvent(createBenchEvent('abort'))
         },
-        { once: true },
-      );
+        { once: true }
+      )
     }
-  }
-
-  /**
-   * run the added tasks that were registered using the
-   * {@link add} method.
-   * Note: This method does not do any warmup. Call {@link warmup} for that.
-   */
-  async run() {
-    this.dispatchEvent(createBenchEvent('start'));
-    const values: Task[] = [];
-    for (const task of [...this._tasks.values()]) {
-      if (this.signal?.aborted) values.push(task);
-      else values.push(await task.run());
-    }
-    this.dispatchEvent(createBenchEvent('complete'));
-    return values;
-  }
-
-  /**
-   * warmup the benchmark tasks.
-   * This is not run by default by the {@link run} method.
-   */
-  async warmup() {
-    this.dispatchEvent(createBenchEvent('warmup'));
-    for (const [, task] of this._tasks) {
-      await task.warmup();
-    }
-  }
-
-  /**
-   * reset each task and remove its result
-   */
-  reset() {
-    this.dispatchEvent(createBenchEvent('reset'));
-    this._tasks.forEach((task) => {
-      task.reset();
-    });
   }
 
   /**
    * add a benchmark task to the task map
+   * @param name - the task name
+   * @param fn - the task function
+   * @param fnOpts - the task function options
+   * @returns the Bench instance
+   * @throws if the task already exists
    */
-  add(name: string, fn: Fn, opts: FnOptions = {}) {
-    const task = new Task(this, name, fn, opts);
-    this._tasks.set(name, task);
-    this.dispatchEvent(createBenchEvent('add', task));
-    return this;
+  add (name: string, fn: Fn, fnOpts: FnOptions = {}): this {
+    if (!this._tasks.has(name)) {
+      const task = new Task(this, name, fn, fnOpts)
+      this._tasks.set(name, task)
+      this.dispatchEvent(createBenchEvent('add', task))
+    } else {
+      throw new Error(`Task "${name}" already exists`)
+    }
+    return this
   }
 
-  /**
-   * add a benchmark todo to the todo map
-   */
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  todo(name: string, fn: Fn = () => {}, opts: FnOptions = {}) {
-    const task = new Task(this, name, fn, opts);
-    this._todos.set(name, task);
-    this.dispatchEvent(createBenchEvent('todo', task));
-    return this;
-  }
-
-  /**
-   * remove a benchmark task from the task map
-   */
-  remove(name: string) {
-    const task = this.getTask(name);
-    this.dispatchEvent(createBenchEvent('remove', task));
-    this._tasks.delete(name);
-    return this;
-  }
-
-  addEventListener<K extends BenchEvents, T = BenchEventsMap[K]>(
+  addEventListener<K extends BenchEvents>(
     type: K,
-    listener: T,
-    options?: boolean | AddEventListenerOptions,
+    listener: BenchEventsMap[K],
+    options?: AddEventListenerOptionsArgument
   ): void {
-    super.addEventListener(type as string, listener as any, options);
-  }
-
-  removeEventListener<K extends BenchEvents, T = BenchEventsMap[K]>(
-    type: K,
-    listener: T,
-    options?: boolean | EventListenerOptions,
-  ) {
-    super.removeEventListener(type as string, listener as any, options);
-  }
-
-  /**
-   * table of the tasks results
-   */
-  table() {
-    return this.tasks.map(({ name, result }) => {
-      if (result) {
-        return {
-          'Task Name': name,
-          'ops/sec': parseInt(result.hz.toString(), 10).toLocaleString(),
-          'Average Time (ns)': result.mean * 1000 * 1000,
-          Margin: `\xb1${result.rme.toFixed(2)}%`,
-          Samples: result.samples.length,
-        };
-      }
-      return null;
-    });
-  }
-
-  /**
-   * (getter) tasks results as an array
-   */
-  get results(): (TaskResult | undefined)[] {
-    return [...this._tasks.values()].map((task) => task.result);
-  }
-
-  /**
-   * (getter) tasks as an array
-   */
-  get tasks(): Task[] {
-    return [...this._tasks.values()];
-  }
-
-  get todos(): Task[] {
-    return [...this._todos.values()];
+    super.addEventListener(type, listener, options)
   }
 
   /**
    * get a task based on the task name
+   * @param name - the task name
+   * @returns the Task instance
    */
-  getTask(name: string): Task | undefined {
-    return this._tasks.get(name);
+  getTask (name: string): Task | undefined {
+    return this._tasks.get(name)
+  }
+
+  /**
+   * remove a benchmark task from the task map
+   * @param name - the task name
+   * @returns the Bench instance
+   */
+  remove (name: string): this {
+    const task = this.getTask(name)
+    if (task) {
+      this.dispatchEvent(createBenchEvent('remove', task))
+      this._tasks.delete(name)
+    }
+    return this
+  }
+
+  removeEventListener<K extends BenchEvents>(
+    type: K,
+    listener: BenchEventsMap[K],
+    options?: RemoveEventListenerOptionsArgument
+  ): void {
+    super.removeEventListener(type, listener, options)
+  }
+
+  /**
+   * reset tasks and remove their result
+   */
+  reset (): void {
+    this.dispatchEvent(createBenchEvent('reset'))
+    for (const task of this._tasks.values()) {
+      task.reset()
+    }
+  }
+
+  /**
+   * run the added tasks that were registered using the {@link add} method
+   * @returns the tasks array
+   */
+  async run (): Promise<Task[]> {
+    if (this.opts.warmup) {
+      await this.warmupTasks()
+    }
+    let values: Task[] = []
+    this.dispatchEvent(createBenchEvent('start'))
+    if (this.concurrency === 'bench') {
+      const limit = pLimit(this.threshold)
+      const promises: Promise<Task>[] = []
+      for (const task of this._tasks.values()) {
+        promises.push(limit(task.run.bind(task)))
+      }
+      values = await Promise.all(promises)
+    } else {
+      for (const task of this._tasks.values()) {
+        values.push(await task.run())
+      }
+    }
+    this.dispatchEvent(createBenchEvent('complete'))
+    return values
+  }
+
+  /**
+   * run the added tasks that were registered using the {@link add} method (sync version)
+   * @returns the tasks array
+   */
+  runSync (): Task[] {
+    invariant(
+      this.concurrency === null,
+      'Cannot use `concurrency` option when using `runSync`'
+    )
+    if (this.opts.warmup) {
+      this.warmupTasksSync()
+    }
+    const values: Task[] = []
+    this.dispatchEvent(createBenchEvent('start'))
+    for (const task of this._tasks.values()) {
+      values.push(task.runSync())
+    }
+    this.dispatchEvent(createBenchEvent('complete'))
+    return values
+  }
+
+  /**
+   * table of the tasks results
+   * @param convert - an optional callback to convert the task result to a table record
+   * @returns the tasks results as an array of table records
+   */
+  table (
+    convert?: (task: Task) => Record<string, number | string | undefined>
+  ): (null | Record<string, number | string | undefined>)[] {
+    return this.tasks.map(task => {
+      if (task.result) {
+        const { error, latency, throughput } = task.result
+        /* eslint-disable perfectionist/sort-objects */
+        return error
+          ? {
+              'Task name': task.name,
+              Error: error.message,
+              Stack: error.stack,
+            }
+          : (convert?.(task) ?? {
+              'Task name': task.name,
+              'Latency avg (ns)': `${formatNumber(mToNs(latency.mean), 5, 2)} \xb1 ${latency.rme.toFixed(2)}%`,
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              'Latency med (ns)': `${formatNumber(mToNs(latency.p50!), 5, 2)} \xb1 ${formatNumber(mToNs(latency.mad!), 5, 2)}`,
+              'Throughput avg (ops/s)': `${Math.round(throughput.mean).toString()} \xb1 ${throughput.rme.toFixed(2)}%`,
+              // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+              'Throughput med (ops/s)': `${Math.round(throughput.p50!).toString()} \xb1 ${Math.round(throughput.mad!).toString()}`,
+              Samples: latency.samples.length,
+            })
+        /* eslint-enable perfectionist/sort-objects */
+      }
+      return null
+    })
+  }
+
+  /**
+   * warmup the benchmark tasks.
+   */
+  private async warmupTasks (): Promise<void> {
+    this.dispatchEvent(createBenchEvent('warmup'))
+    if (this.concurrency === 'bench') {
+      const limit = pLimit(this.threshold)
+      const promises: Promise<void>[] = []
+      for (const task of this._tasks.values()) {
+        promises.push(limit(task.warmup.bind(task)))
+      }
+      await Promise.all(promises)
+    } else {
+      for (const task of this._tasks.values()) {
+        await task.warmup()
+      }
+    }
+  }
+
+  /**
+   * warmup the benchmark tasks (sync version)
+   */
+  private warmupTasksSync (): void {
+    this.dispatchEvent(createBenchEvent('warmup'))
+    for (const task of this._tasks.values()) {
+      task.warmupSync()
+    }
   }
 }
